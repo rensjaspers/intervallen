@@ -57,6 +57,7 @@ interface DomPress {
 }
 
 type Phase = 'playing' | 'answer' | 'feedback';
+type Review = 'correct' | 'yours';
 
 const INTERVALS: readonly Interval[] = [
   { semis: 0, short: 'P1', name: 'reine prime', quality: 'perfect' },
@@ -134,6 +135,7 @@ const FIXED_ROOT = 60;
 const ROOT_MIN = 48;
 const ROOT_MAX = 60;
 const STORAGE_KEY = 'intervallen-best-v1';
+const REVIEW_PAUSE_MS = 700;
 
 const BG = '#14120e';
 const INK = '#f6f1e7';
@@ -456,6 +458,7 @@ export default function IntervalTrainer() {
   const [phase, setPhase] = useState<Phase>('playing');
   const [round, setRound] = useState<Round | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [review, setReview] = useState<Review | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [lit, setLit] = useState<number[]>([]);
   const [score, setScore] = useState<number>(0);
@@ -465,6 +468,7 @@ export default function IntervalTrainer() {
   const [geom, setGeom] = useState<Geom | null>(null);
 
   const audioRef = useRef<AudioEngine | null>(null);
+  const feedbackRef = useRef<Feedback | null>(null);
   const timers = useRef<number[]>([]);
   const phaseRef = useRef<Phase>('playing');
   const roundRef = useRef<Round | null>(null);
@@ -487,21 +491,29 @@ export default function IntervalTrainer() {
     timers.current.push(id);
   }, []);
 
+  const playNotes = useCallback((root: number, semis: number, harmonic: boolean): void => {
+    const engine = audioRef.current;
+    if (!engine) return;
+    ensureRunning(engine.ctx);
+    const top = root + semis;
+    const t0 = engine.ctx.currentTime + 0.04;
+    if (harmonic) {
+      playPiano(engine.ctx, engine.dest, root, t0, 0.84);
+      if (semis !== 0) playPiano(engine.ctx, engine.dest, top, t0, 0.8);
+      return;
+    }
+    playPiano(engine.ctx, engine.dest, root, t0, 0.88);
+    playPiano(engine.ctx, engine.dest, top, t0 + 0.62, 0.96);
+  }, []);
+
   const soundRound = useCallback(
     (nextLevel: Level, current: Round, peek: boolean): void => {
-      const engine = audioRef.current;
-      if (!engine) return;
-      ensureRunning(engine.ctx);
+      playNotes(current.root, current.semis, nextLevel.harmonic);
       const top = current.root + current.semis;
-      const t0 = engine.ctx.currentTime + 0.04;
       if (nextLevel.harmonic) {
-        playPiano(engine.ctx, engine.dest, current.root, t0, 0.84);
-        if (current.semis !== 0) playPiano(engine.ctx, engine.dest, top, t0, 0.8);
         setLit(peek ? (current.semis === 0 ? [current.root] : [current.root, top]) : []);
         return;
       }
-      playPiano(engine.ctx, engine.dest, current.root, t0, 0.88);
-      playPiano(engine.ctx, engine.dest, top, t0 + 0.62, 0.96);
       if (!peek) {
         setLit([]);
         return;
@@ -511,7 +523,16 @@ export default function IntervalTrainer() {
         setLit(current.semis === 0 ? [current.root] : [current.root, top]);
       });
     },
-    [later],
+    [later, playNotes],
+  );
+
+  const replayInterval = useCallback(
+    (root: number, semis: number, harmonic: boolean, kind: Review): void => {
+      setReview(kind);
+      setLit(semis === 0 ? [root] : [root, root + semis]);
+      playNotes(root, semis, harmonic);
+    },
+    [playNotes],
   );
 
   const startRound = useCallback(
@@ -523,8 +544,10 @@ export default function IntervalTrainer() {
       const nextRound: Round = { root, semis };
       roundRef.current = nextRound;
       phaseRef.current = 'playing';
+      feedbackRef.current = null;
       setRound(nextRound);
       setFeedback(null);
+      setReview(null);
       setHint(null);
       setPhase('playing');
       soundRound(nextLevel, nextRound, nextLevel.peek);
@@ -559,19 +582,34 @@ export default function IntervalTrainer() {
         });
       }
       setHint(null);
-      setFeedback({ ok, picked: semis, answer: current.semis });
+      const nextFeedback: Feedback = { ok, picked: semis, answer: current.semis };
+      feedbackRef.current = nextFeedback;
+      setFeedback(nextFeedback);
       setPhase('feedback');
-      setLit([current.root, current.root + current.semis]);
-      later(ok ? 780 : 2100, (): void => {
-        const finished = roundRef.current;
-        startRound(
-          levelIdRef.current,
-          finished ? finished.semis : null,
-          finished ? finished.root : null,
-        );
+      if (ok) {
+        setReview(null);
+        setLit([current.root, current.root + current.semis]);
+        later(780, (): void => {
+          const finished = roundRef.current;
+          startRound(
+            levelIdRef.current,
+            finished ? finished.semis : null,
+            finished ? finished.root : null,
+          );
+        });
+        return;
+      }
+      setReview(null);
+      setLit([]);
+      later(REVIEW_PAUSE_MS, (): void => {
+        if (phaseRef.current !== 'feedback') return;
+        const still = roundRef.current;
+        const fb = feedbackRef.current;
+        if (!still || !fb || fb.ok) return;
+        replayInterval(still.root, still.semis, findLevel(levelIdRef.current).harmonic, 'correct');
       });
     },
-    [later, startRound],
+    [later, replayInterval, startRound],
   );
 
   useEffect((): (() => void) => {
@@ -651,11 +689,12 @@ export default function IntervalTrainer() {
     if (phase === 'playing') return level.peek ? 'Luister… je mag kijken' : 'Luister…';
     if (phase === 'answer') return 'Welk interval?';
     if (phase === 'feedback' && feedback) {
-      const spoken = spokenName(intervalBySemis(feedback.answer));
+      const interval = intervalBySemis(feedback.answer);
       if (feedback.ok) {
+        const spoken = spokenName(interval);
         return streak > 1 ? `Goed · ${spoken} · reeks ${streak}` : `Goed · ${spoken}`;
       }
-      return `Helaas · dat was een ${spoken}`;
+      return `Het was: ${interval.name}`;
     }
     return 'Welk interval?';
   }, [hint, phase, level.peek, feedback, streak]);
@@ -705,6 +744,48 @@ export default function IntervalTrainer() {
       soundRound(findLevel(levelIdRef.current), current, findLevel(levelIdRef.current).peek);
     },
     [soundRound],
+  );
+
+  const handleHearCorrect = useCallback(
+    (event: DomPress): void => {
+      event.preventDefault();
+      if (phaseRef.current !== 'feedback') return;
+      const current = roundRef.current;
+      const fb = feedbackRef.current;
+      if (!current || !fb || fb.ok) return;
+      clearTimers();
+      replayInterval(current.root, current.semis, findLevel(levelIdRef.current).harmonic, 'correct');
+    },
+    [clearTimers, replayInterval],
+  );
+
+  const handleHearYours = useCallback(
+    (event: DomPress): void => {
+      event.preventDefault();
+      if (phaseRef.current !== 'feedback') return;
+      const current = roundRef.current;
+      const fb = feedbackRef.current;
+      if (!current || !fb || fb.ok) return;
+      clearTimers();
+      replayInterval(current.root, fb.picked, findLevel(levelIdRef.current).harmonic, 'yours');
+    },
+    [clearTimers, replayInterval],
+  );
+
+  const handleNext = useCallback(
+    (event: DomPress): void => {
+      event.preventDefault();
+      if (phaseRef.current !== 'feedback') return;
+      const fb = feedbackRef.current;
+      if (!fb || fb.ok) return;
+      const finished = roundRef.current;
+      startRound(
+        levelIdRef.current,
+        finished ? finished.semis : null,
+        finished ? finished.root : null,
+      );
+    },
+    [startRound],
   );
 
   const handleToggleLevels = useCallback((event: DomPress): void => {
@@ -1027,6 +1108,79 @@ export default function IntervalTrainer() {
             {status}
           </div>
 
+          {phase === 'feedback' && feedback && !feedback.ok ? (
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'center',
+                flexWrap: 'wrap',
+                gap: 6,
+                flex: '0 0 auto',
+              }}
+            >
+              <button
+                type="button"
+                aria-label="Nog eens horen"
+                onClick={handleHearCorrect}
+                style={{
+                  minHeight: 36,
+                  borderRadius: 8,
+                  border: `1px solid ${LINE}`,
+                  background: '#2a261f',
+                  color: INK,
+                  font: 'inherit',
+                  fontSize: 13,
+                  fontWeight: 650,
+                  padding: '0 12px',
+                  touchAction: 'manipulation',
+                  cursor: 'pointer',
+                }}
+              >
+                Nog eens horen
+              </button>
+              <button
+                type="button"
+                aria-label="Jouw antwoord"
+                onClick={handleHearYours}
+                style={{
+                  minHeight: 36,
+                  borderRadius: 8,
+                  border: `1px solid ${LINE}`,
+                  background: '#2a261f',
+                  color: INK,
+                  font: 'inherit',
+                  fontSize: 13,
+                  fontWeight: 650,
+                  padding: '0 12px',
+                  touchAction: 'manipulation',
+                  cursor: 'pointer',
+                }}
+              >
+                Jouw antwoord
+              </button>
+              <button
+                type="button"
+                aria-label="Volgende"
+                onClick={handleNext}
+                style={{
+                  minHeight: 36,
+                  borderRadius: 8,
+                  border: 'none',
+                  background: GOLD,
+                  color: '#241c0c',
+                  font: 'inherit',
+                  fontSize: 13,
+                  fontWeight: 750,
+                  padding: '0 12px',
+                  touchAction: 'manipulation',
+                  cursor: 'pointer',
+                }}
+              >
+                Volgende
+              </button>
+            </div>
+          ) : null}
+
           <div
             style={{
               flex: '1 1 auto',
@@ -1144,16 +1298,17 @@ export default function IntervalTrainer() {
     const inRange = round !== null && midi >= round.root && midi <= round.root + 12;
     const isRoot = round !== null && midi === round.root;
     const semis = round ? midi - round.root : -1;
-    const isPeek = phase !== 'feedback' && lit.indexOf(midi) !== -1;
+    const litNow = lit.indexOf(midi) !== -1;
+    const isPeek = phase !== 'feedback' && litNow;
+    const wrongReview = phase === 'feedback' && feedback !== null && !feedback.ok;
     const isCorrect =
-      phase === 'feedback' && feedback !== null && round !== null && midi === round.root + feedback.answer;
-    const isWrong =
-      phase === 'feedback' &&
-      feedback !== null &&
-      !feedback.ok &&
-      round !== null &&
-      midi === round.root + feedback.picked &&
-      midi !== round.root + feedback.answer;
+      (wrongReview && review === 'correct' && litNow) ||
+      (phase === 'feedback' &&
+        feedback !== null &&
+        feedback.ok &&
+        round !== null &&
+        midi === round.root + feedback.answer);
+    const isWrong = wrongReview && review === 'yours' && litNow;
     let background = layout.black
       ? 'linear-gradient(#3a342e, #120f0c 28%)'
       : 'linear-gradient(#fffdf8, #f1e6d4 72%, #e4d5c0)';
@@ -1189,7 +1344,9 @@ export default function IntervalTrainer() {
         type="button"
         data-midi={midi}
         data-root={isRoot ? '1' : '0'}
+        data-lit={litNow ? '1' : '0'}
         data-correct={isCorrect ? '1' : '0'}
+        data-yours={isWrong ? '1' : '0'}
         aria-label={label}
         disabled={phase !== 'answer'}
         onClick={(event: DomPress) => {

@@ -1,4 +1,4 @@
-const CACHE = 'intervallen-35ecd57a05';
+const CACHE = 'intervallen-a2bc5de1c8';
 const ASSETS = ['./', './index.html', './app.js', './manifest.json', './icon-180.png', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

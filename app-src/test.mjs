@@ -37,15 +37,71 @@ await page.tap('text=Begin');
 await page.waitForTimeout(1500);
 const st = await page.evaluate(() => ({ state: window.__ctxs[0]?.state, peak: window.__peak, osc: window.__oscStarts, audioAttr: document.querySelector('[data-audio]')?.getAttribute('data-audio'), keys: document.querySelectorAll('[data-midi]').length, labels: document.querySelectorAll('[data-code]').length }));
 console.log('after Begin:', JSON.stringify(st));
-// answer a round by tapping first enabled interval button
 await page.evaluate(()=>{window.__peak=0;});
-const btn = page.locator('button[aria-label="reine prime"]');
-await btn.tap();
-await page.waitForTimeout(2600);
-const st2 = await page.evaluate(() => ({ peak: window.__peak, osc: window.__oscStarts, status: document.querySelector('[role=status]')?.textContent }));
-console.log('after answer + next round:', JSON.stringify(st2));
+const wrongCode = await page.evaluate(() => {
+  const lit = new Set();
+  for (const btn of document.querySelectorAll('[data-lit="1"]')) {
+    const code = btn.querySelector('[data-code]')?.getAttribute('data-code');
+    if (code) lit.add(code);
+  }
+  const order = ['k2', 'g2', 'k3', 'g3', '4', 'tt', '5', 'k6', 'g6', 'k7', 'g7', '8', 'P1'];
+  const code = order.find((item) => !lit.has(item));
+  if (!code) throw new Error('geen fout antwoord gevonden, lit=' + [...lit].join(','));
+  return code;
+});
+const names = {
+  P1: 'reine prime',
+  k2: 'kleine secunde',
+  g2: 'grote secunde',
+  k3: 'kleine terts',
+  g3: 'grote terts',
+  '4': 'reine kwart',
+  tt: 'tritonus (overmatige kwart / verminderde kwint)',
+  '5': 'reine kwint',
+  k6: 'kleine sext',
+  g6: 'grote sext',
+  k7: 'kleine septiem',
+  g7: 'grote septiem',
+  '8': 'reine octaaf',
+};
+await page.getByRole('button', { name: names[wrongCode], exact: true }).tap();
+await page.waitForTimeout(1200);
+const review = await page.evaluate(() => ({
+  status: document.querySelector('[role=status]')?.textContent || '',
+  correct: document.querySelectorAll('[data-correct="1"]').length,
+  yours: document.querySelectorAll('[data-yours="1"]').length,
+  next: !!document.querySelector('button[aria-label="Volgende"]'),
+  again: !!document.querySelector('button[aria-label="Nog eens horen"]'),
+  mine: !!document.querySelector('button[aria-label="Jouw antwoord"]'),
+}));
+console.log('after wrong answer:', JSON.stringify(review));
+if (!review.status.startsWith('Het was:')) throw new Error('status mist het juiste interval: ' + review.status);
+if (!review.next || !review.again || !review.mine) throw new Error('review-knoppen ontbreken');
+if (review.correct < 1) throw new Error('juiste toetsen niet opgelicht');
+await page.getByRole('button', { name: 'Nog eens horen' }).tap();
+await page.waitForTimeout(400);
+const again = await page.evaluate(() => document.querySelectorAll('[data-correct="1"]').length);
+if (again < 1) throw new Error('Nog eens horen liet de juiste toetsen niet zien');
+await page.getByRole('button', { name: 'Jouw antwoord' }).tap();
+await page.waitForTimeout(300);
+const yours = await page.evaluate(() => ({
+  yours: document.querySelectorAll('[data-yours="1"]').length,
+  correct: document.querySelectorAll('[data-correct="1"]').length,
+  status: document.querySelector('[role=status]')?.textContent || '',
+}));
+console.log('after jouw antwoord:', JSON.stringify(yours));
+if (yours.yours < 1) throw new Error('jouw antwoord liet geen toetsen zien');
+if (yours.correct !== 0) throw new Error('juiste toetsen bleven branden bij jouw antwoord');
+if (!yours.status.startsWith('Het was:')) throw new Error('rond ging te vroeg verder');
+await page.getByRole('button', { name: 'Volgende' }).tap();
+await page.waitForTimeout(1600);
+const st2 = await page.evaluate(() => ({ peak: window.__peak, osc: window.__oscStarts, status: document.querySelector('[role=status]')?.textContent, review: !!document.querySelector('button[aria-label="Volgende"]') }));
+console.log('after volgende:', JSON.stringify(st2));
+if (st2.review) throw new Error('Volgende liet de review staan');
+if (st2.status && st2.status.startsWith('Het was:')) throw new Error('status bleef op het foute antwoord');
 const sw = await page.evaluate(async () => { const r = await navigator.serviceWorker?.getRegistration(); return !!r; });
 console.log('sw registered:', sw);
 await page.screenshot({ path: 'shot.png' });
 console.log('errors:', JSON.stringify(errors));
+if (errors.length) throw new Error(errors.join('\n'));
 await browser.close(); server?.close();
