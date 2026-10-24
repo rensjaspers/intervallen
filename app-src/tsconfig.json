@@ -1,0 +1,1 @@
+{"compilerOptions":{"jsx":"react-jsx","jsxImportSource":"preact","target":"es2019","module":"esnext","moduleResolution":"bundler","strict":true,"lib":["dom","es2020"],"noEmit":true,"skipLibCheck":true}}
